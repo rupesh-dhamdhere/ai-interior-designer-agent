@@ -8,17 +8,22 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from datetime import datetime
 
 from openai import OpenAI
+from dotenv import load_dotenv
+
 from app.prompts import (
+    SYSTEM_PROMPT,
     VISION_ANALYSIS_PROMPT,
     DESIGN_BRIEF_PROMPT,
-    IMAGE_GENERATION_PROMPT,
-    DESIGN_REQUIREMENTS_PROMPT
+    IMAGE_GENERATION_PROMPT
 )
 from app.image_generator import ImageGenerator
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,34 +44,70 @@ class InteriorDesignerAgent:
         
         self.client = OpenAI(api_key=self.api_key)
         self.vision_model = os.getenv("VISION_MODEL", "gpt-4-vision-preview")
+        self.gpt_model = os.getenv("GPT_MODEL", "gpt-4")
         self.image_generator = ImageGenerator(self.api_key)
         self.uploads_folder = Path(os.getenv("UPLOAD_FOLDER", "./uploads"))
         self.uploads_folder.mkdir(exist_ok=True)
         
-    def analyze_room_image(self, image_path: str) -> Dict:
+        logger.info(f"Agent initialized with vision model: {self.vision_model}")
+        logger.info(f"Agent initialized with GPT model: {self.gpt_model}")
+    
+    def analyze_room(
+        self,
+        image_path: str,
+        room_type: str = "",
+        dimensions: str = "",
+        style: str = "",
+        budget: str = "",
+        requirements: str = ""
+    ) -> Dict:
         """
-        Step 1: Analyze uploaded room photo using GPT-4 Vision
+        Analyze a room using GPT-4 Vision and generate a design proposal
         
         Args:
-            image_path: Path to the uploaded room image
+            image_path: Path to the room image
+            room_type: Type of room (bedroom, living room, etc.)
+            dimensions: Room dimensions if known
+            style: Preferred design style
+            budget: Budget range
+            requirements: Special requirements
             
         Returns:
-            Dictionary with room analysis
+            Dictionary with analysis and design proposal
         """
         logger.info(f"Analyzing room image: {image_path}")
         
         try:
+            # Verify file exists
+            if not os.path.exists(image_path):
+                return {
+                    "success": False,
+                    "error": f"Image file not found: {image_path}"
+                }
+            
             # Encode image to base64
             image_data = self._encode_image(image_path)
             
+            # Build the prompt with user inputs
+            prompt = self._build_analysis_prompt(
+                room_type, dimensions, style, budget, requirements
+            )
+            
+            logger.info("Sending request to GPT-4 Vision API...")
+            
             # Call GPT-4 Vision API
             response = self.client.messages.create(
-                model="gpt-4-vision-preview",
+                model=self.vision_model,
                 max_tokens=2000,
+                system=SYSTEM_PROMPT,
                 messages=[
                     {
                         "role": "user",
                         "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
                             {
                                 "type": "image",
                                 "source": {
@@ -74,29 +115,25 @@ class InteriorDesignerAgent:
                                     "media_type": "image/jpeg",
                                     "data": image_data,
                                 },
-                            },
-                            {
-                                "type": "text",
-                                "text": VISION_ANALYSIS_PROMPT
                             }
                         ],
                     }
                 ],
             )
             
-            # Parse response
+            # Extract response
             analysis_text = response.content[0].text
-            analysis = self._parse_json_response(analysis_text)
             
             logger.info("Room analysis completed successfully")
             return {
                 "success": True,
-                "analysis": analysis,
-                "raw_response": analysis_text
+                "analysis": analysis_text,
+                "model_used": self.vision_model,
+                "timestamp": datetime.now().isoformat()
             }
             
         except Exception as e:
-            logger.error(f"Error analyzing room image: {str(e)}")
+            logger.error(f"Error analyzing room: {str(e)}")
             return {
                 "success": False,
                 "error": str(e)
@@ -104,38 +141,54 @@ class InteriorDesignerAgent:
     
     def generate_design_brief(
         self,
-        room_analysis: Dict,
-        style_preference: str,
-        budget: str,
-        requirements: str
+        room_analysis: str,
+        room_type: str = "",
+        dimensions: str = "",
+        style: str = "",
+        budget: str = "",
+        requirements: str = ""
     ) -> Dict:
         """
-        Step 2: Generate design brief based on analysis and requirements
+        Generate a detailed design brief based on room analysis
         
         Args:
-            room_analysis: Analysis from Step 1
-            style_preference: User's preferred design style
+            room_analysis: Analysis from analyze_room()
+            room_type: Type of room
+            dimensions: Room dimensions
+            style: Preferred design style
             budget: Budget range
             requirements: Special requirements
             
         Returns:
             Dictionary with design brief
         """
-        logger.info("Generating design brief")
+        logger.info("Generating design brief from analysis")
         
         try:
-            # Format the prompt with provided data
-            prompt = DESIGN_BRIEF_PROMPT.format(
-                room_analysis=json.dumps(room_analysis, indent=2),
-                style_preference=style_preference,
-                budget=budget,
-                requirements=requirements
-            )
+            # Build the design brief prompt
+            prompt = f"""
+Based on the following room analysis, create a comprehensive interior design brief.
+
+ROOM ANALYSIS:
+{room_analysis}
+
+USER REQUIREMENTS:
+- Room Type: {room_type or 'Not specified'}
+- Dimensions: {dimensions or 'Not specified'}
+- Preferred Style: {style or 'Not specified'}
+- Budget: {budget or 'Not specified'}
+- Requirements: {requirements or 'None specified'}
+
+{DESIGN_BRIEF_PROMPT}
+"""
             
-            # Call GPT API
+            logger.info("Sending request to GPT-4 API for design brief...")
+            
+            # Call GPT-4 API
             response = self.client.messages.create(
-                model="gpt-4",
+                model=self.gpt_model,
                 max_tokens=3000,
+                system=SYSTEM_PROMPT,
                 messages=[
                     {
                         "role": "user",
@@ -145,13 +198,13 @@ class InteriorDesignerAgent:
             )
             
             brief_text = response.content[0].text
-            brief = self._parse_json_response(brief_text)
             
             logger.info("Design brief generated successfully")
             return {
                 "success": True,
-                "brief": brief,
-                "raw_response": brief_text
+                "brief": brief_text,
+                "model_used": self.gpt_model,
+                "timestamp": datetime.now().isoformat()
             }
             
         except Exception as e:
@@ -161,12 +214,12 @@ class InteriorDesignerAgent:
                 "error": str(e)
             }
     
-    def generate_design_visualization(self, design_brief: Dict) -> Dict:
+    def generate_design_visualization(self, design_brief: str) -> Dict:
         """
-        Step 3: Generate design visualization image using DALL-E
+        Generate design visualization image using DALL-E
         
         Args:
-            design_brief: Design brief from Step 2
+            design_brief: Design brief text
             
         Returns:
             Dictionary with generated image URL and metadata
@@ -174,7 +227,21 @@ class InteriorDesignerAgent:
         logger.info("Generating design visualization")
         
         try:
-            result = self.image_generator.generate_design_image(design_brief)
+            # Extract key information from design brief for prompt construction
+            visualization_prompt = f"""
+Based on this interior design brief, create a photorealistic visualization 
+of the redesigned room:
+
+{design_brief}
+
+Use the guidelines from the IMAGE_GENERATION_PROMPT to create a professional, 
+client-ready visualization.
+"""
+            
+            # Use image generator to create visualization
+            result = self.image_generator.generate_design_image_from_brief(
+                visualization_prompt
+            )
             
             if result["success"]:
                 logger.info("Design visualization generated successfully")
@@ -193,16 +260,20 @@ class InteriorDesignerAgent:
     def run_complete_workflow(
         self,
         image_path: str,
-        style_preference: str,
-        budget: str,
-        requirements: str
+        room_type: str = "",
+        dimensions: str = "",
+        style: str = "",
+        budget: str = "",
+        requirements: str = ""
     ) -> Dict:
         """
         Run the complete design workflow from image to visualization
         
         Args:
             image_path: Path to room image
-            style_preference: User's design style preference
+            room_type: Room type
+            dimensions: Room dimensions
+            style: Preferred design style
             budget: Budget range
             requirements: Special requirements
             
@@ -213,28 +284,31 @@ class InteriorDesignerAgent:
         
         workflow_results = {
             "timestamp": datetime.now().isoformat(),
+            "image_path": image_path,
             "steps": {}
         }
         
         # Step 1: Analyze room
         logger.info("Step 1: Analyzing room image...")
-        analysis_result = self.analyze_room_image(image_path)
+        analysis_result = self.analyze_room(
+            image_path, room_type, dimensions, style, budget, requirements
+        )
         workflow_results["steps"]["analysis"] = analysis_result
         
         if not analysis_result["success"]:
+            workflow_results["success"] = False
             return workflow_results
         
         # Step 2: Generate design brief
         logger.info("Step 2: Generating design brief...")
         brief_result = self.generate_design_brief(
             analysis_result["analysis"],
-            style_preference,
-            budget,
-            requirements
+            room_type, dimensions, style, budget, requirements
         )
         workflow_results["steps"]["design_brief"] = brief_result
         
         if not brief_result["success"]:
+            workflow_results["success"] = False
             return workflow_results
         
         # Step 3: Generate visualization
@@ -262,29 +336,50 @@ class InteriorDesignerAgent:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
     
-    def _parse_json_response(self, response_text: str) -> Dict:
+    def _build_analysis_prompt(
+        self,
+        room_type: str,
+        dimensions: str,
+        style: str,
+        budget: str,
+        requirements: str
+    ) -> str:
         """
-        Parse JSON from LLM response
+        Build the analysis prompt with user inputs
         
         Args:
-            response_text: Raw response from LLM
+            room_type: Type of room
+            dimensions: Room dimensions
+            style: Preferred design style
+            budget: Budget range
+            requirements: Special requirements
             
         Returns:
-            Parsed dictionary or original text if parsing fails
+            Formatted prompt string
         """
-        try:
-            # Try to extract JSON from response
-            import json as json_module
-            # Look for JSON in the response
-            start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}') + 1
-            
-            if start_idx != -1 and end_idx > start_idx:
-                json_str = response_text[start_idx:end_idx]
-                return json_module.loads(json_str)
-            else:
-                # Return as structured dict if no JSON found
-                return {"content": response_text}
-        except Exception as e:
-            logger.warning(f"Could not parse JSON response: {str(e)}")
-            return {"content": response_text}
+        prompt = f"""
+Analyze this room photograph and create an interior design proposal.
+
+User Information:
+================
+Room Type: {room_type if room_type else 'Not specified'}
+Dimensions: {dimensions if dimensions else 'Not specified'}
+Preferred Style: {style if style else 'Not specified'}
+Budget: {budget if budget else 'Not specified'}
+Requirements: {requirements if requirements else 'None specified'}
+
+Please analyze the photograph and provide:
+
+{VISION_ANALYSIS_PROMPT}
+
+Then provide your initial design concept considering:
+- The existing architecture and good bones of the space
+- The user's stated preferences
+- Budget constraints
+- Practical improvements that would maximize the space
+- A cohesive design direction
+
+Preserve architectural features unless structural changes are explicitly requested.
+Make recommendations that are realistic and practical to implement.
+"""
+        return prompt.strip()
